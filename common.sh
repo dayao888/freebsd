@@ -171,6 +171,42 @@ J
   printf 'vmess://%s\n' "$b64"
 }
 
+# Ensure cloudflared availability (optional). Download static binary for FreeBSD amd64 if missing.
+ensure_cloudflared() {
+  if command -v cloudflared >/dev/null 2>&1; then
+    return 0
+  fi
+  local cfb="${BIN_DIR}/cloudflared"
+  if [ -x "${cfb}" ]; then
+    PATH="${BIN_DIR}:$PATH"; export PATH
+    return 0
+  fi
+  info "尝试下载 cloudflared 二进制(FreeBSD amd64)..."
+  mkdir -p "${BIN_DIR}" || true
+  # Try latest first, then a few pinned versions
+  urls='
+https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-freebsd-amd64
+https://github.com/cloudflare/cloudflared/releases/download/2024.10.0/cloudflared-freebsd-amd64
+https://github.com/cloudflare/cloudflared/releases/download/2024.9.1/cloudflared-freebsd-amd64
+https://github.com/cloudflare/cloudflared/releases/download/2024.7.0/cloudflared-freebsd-amd64
+'
+  tmp="${cfb}.tmp"
+  echo "$urls" | while read -r url; do
+    [ -z "$url" ] && continue
+    if _fetch "$url" "$tmp" 2>/dev/null; then
+      chmod +x "$tmp" && mv "$tmp" "$cfb"
+      break
+    fi
+  done
+  if [ -x "${cfb}" ]; then
+    PATH="${BIN_DIR}:$PATH"; export PATH
+    info "cloudflared 已安装到 ${cfb}"
+    return 0
+  fi
+  warn "无法自动下载 cloudflared，请手动安装或放置到 PATH。"
+  return 1
+}
+
 # Save .env helper
 save_env() {
   umask 077
