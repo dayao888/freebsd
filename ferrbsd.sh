@@ -130,14 +130,32 @@ openssl_reality_keypair() {
     | xxd -r -p | openssl base64 -A | tr '+/' '-_' | tr -d '=')
 }
 
+# Small helper to sanitize (strip CR/LF/leading-trailing spaces)
+sanitize() { printf '%s' "$1" | tr -d '\r' | awk '{$1=$1}1'; }
+
 # Generate UUIDs and keys
 UUID_MAIN=$(mk_uuid | head -n1 | tr -d '\r')
+UUID_MAIN=$(sanitize "${UUID_MAIN}")
 HY2_PASS="${UUID_MAIN}"
 mk_reality_keys || true
 # If keys are empty, try OpenSSL fallback automatically
 if [ -z "${REALITY_PRIVATE_KEY:-}" ] || [ -z "${REALITY_PUBLIC_KEY:-}" ]; then
   openssl_reality_keypair
 fi
+# Sanitize Reality keys
+REALITY_PRIVATE_KEY=$(sanitize "${REALITY_PRIVATE_KEY}")
+REALITY_PUBLIC_KEY=$(sanitize "${REALITY_PUBLIC_KEY}")
+
+# Build sing-box config.json (define before ACME to avoid unset in reloadcmd)
+CONFIG_JSON="${CONF_DIR}/config.json"
+
+# Normalize frequently used fields before templating
+REALITY_SNI=$(sanitize "${REALITY_SNI}")
+REALITY_FP=$(sanitize "${REALITY_FP}")
+WSPATH=$(sanitize "${WSPATH}")
+ACME_DOMAIN=$(sanitize "${ACME_DOMAIN:-}")
+ACME_EMAIL=$(sanitize "${ACME_EMAIL:-}")
+ARGO_DOMAIN=$(sanitize "${ARGO_DOMAIN:-}")
 
 # ACME: issue/renew using acme.sh DNS-01 (Cloudflare)
 setup_acme() {
@@ -148,13 +166,23 @@ setup_acme() {
     return 0
   fi
   ensure_acme_sh || { warn "acme.sh 安装失败，跳过证书签发"; return 0; }
+  ACME_BIN="$HOME/.acme.sh/acme.sh"
+  # Force Let's Encrypt (avoid ZeroSSL email requirement)
+  "$ACME_BIN" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+  if ! "$ACME_BIN" --list | grep -q "ACCOUNT_.*LETSENCRYPT" 2>/dev/null; then
+    if [ -n "${ACME_EMAIL:-}" ]; then
+      "$ACME_BIN" --register-account -m "${ACME_EMAIL}" >/dev/null 2>&1 || true
+    else
+      # Try register without email (LE allows), ignore failure
+      "$ACME_BIN" --register-account >/dev/null 2>&1 || true
+    fi
+  fi
   export CF_Token="${CF_API_TOKEN:-}"
   export CF_Zone_ID="${CF_ZONE_ID:-}"
   export CF_Account_ID="${CF_ACCOUNT_ID:-}"
-  ACME_BIN="$HOME/.acme.sh/acme.sh"
   mkdir -p "${CERT_DIR}"
   if ! "$ACME_BIN" --list | grep -q "${ACME_DOMAIN}.*ECC"; then
-    info "申请证书: ${ACME_DOMAIN} (DNS-01 / Cloudflare)"
+    info "申请证书: ${ACME_DOMAIN} (Let’s Encrypt / DNS-01)"
     "$ACME_BIN" --issue --dns dns_cf -d "${ACME_DOMAIN}" --keylength ec-256 || {
       warn "证书申请失败，稍后可重试"
       return 0
@@ -167,41 +195,10 @@ setup_acme() {
   "$ACME_BIN" --install-cronjob >/dev/null 2>&1 || true
 }
 
-# Cloudflared: create/route/run fixed tunnel, or run with token
-setup_argo() {
-  [ "${ARGO_MODE:-fixed}" = "fixed" ] || return 0
-  ensure_cloudflared || { warn "cloudflared 不可用，跳过隧道启动"; return 0; }
-  mkdir -p "${ARGO_DIR}"
-  # Prefer token-based run if provided
-  if [ -n "${ARGO_TOKEN:-}" ]; then
-    info "使用 Token 运行固定隧道 (假定 DNS 已完成 CNAME)"
-    nohup cloudflared tunnel --no-autoupdate run --token "${ARGO_TOKEN}" >"${LOG_DIR}/cloudflared.out" 2>&1 &
-    return 0
-  fi
-  # Otherwise use credentials file + tun name/id to bind DNS and run
-  if [ -n "${ARGO_TUN_NAME:-}" ] && [ -n "${ARGO_TUN_ID:-}" ] && [ -n "${ARGO_CRED_FILE:-}" ] && [ -n "${ARGO_DOMAIN:-}" ]; then
-    CFG_FILE="${ARGO_DIR}/config.yml"
-    cat >"${CFG_FILE}" <<Y
-`tunnel`: ${ARGO_TUN_NAME}
-`credentials-file`: ${ARGO_CRED_FILE}
-
-ingress:
-  - hostname: ${ARGO_DOMAIN}
-    service: http://127.0.0.1:${VMESS_WS_PORT}
-  - service: http_status:404
-Y
-    # Try to bind DNS via cloudflared (requires cert-based auth)
-    cloudflared tunnel --config "${CFG_FILE}" route dns "${ARGO_TUN_NAME}" "${ARGO_DOMAIN}" >/dev/null 2>&1 || true
-    nohup cloudflared --config "${CFG_FILE}" tunnel run "${ARGO_TUN_NAME}" >"${LOG_DIR}/cloudflared.out" 2>&1 &
-  else
-    warn "固定隧道参数不完整，跳过隧道启动"
-  fi
-}
-
 # Run ACME issuance first (might provide certs for HY2)
 setup_acme
 
-# TLS for HY2 if cert present and ACME enabled
+# TLS for HY2 if cert present
 HY2_TLS_ENABLED=0
 CERT_PATH="${CERT_DIR}/fullchain.cer"
 KEY_PATH="${CERT_DIR}/private.key"
@@ -331,6 +328,11 @@ ${VMESS_IN}
   ${ROUTE_JSON}
 }
 JSON
+
+# Quick JSON sanity (avoid silent broken file)
+if ! grep -q '"inbounds"' "${CONFIG_JSON}"; then
+  err "生成的 config.json 异常，请检查变量是否含有非法字符。"; exit 1
+fi
 
 # Start sing-box (restart if running)
 kill -TERM $(pgrep -f "${SB_BIN}.*${CONFIG_JSON}" || true) 2>/dev/null || true
