@@ -44,11 +44,11 @@ esac
 if [ "${ACME_ENABLE}" = "1" ]; then
   printf "请输入证书域名(供需要 TLS 的入站使用，可留空跳过)："
   read -r ACME_DOMAIN || true
-  printf "ACME 邮箱："; read -r ACME_EMAIL || true
-  printf "Cloudflare API Token（DNS-01 用，留空则不自动签发）："; read -r CF_API_TOKEN || true
+  printf "ACME 邮箱（可留空）："; read -r ACME_EMAIL || true
+  printf "Cloudflare API Token（DNS-01，用于自动签发；留空则跳过）："; read -r CF_API_TOKEN || true
 fi
 
-# Argo fixed tunnel config
+# Argo fixed tunnel config — 优先 token 模式，最简
 ARGO_MODE=${ARGO_MODE:-fixed}
 printf "使用 Cloudflare 固定隧道？[Y/n] (临时隧道仅测试用) : "
 read -r ans || true
@@ -57,13 +57,17 @@ case "${ans:-Y}" in
   *) ARGO_MODE="fixed" ;;
 esac
 if [ "${ARGO_MODE}" = "fixed" ]; then
-  printf "请输入隧道名称："; read -r ARGO_TUN_NAME || true
-  printf "请输入隧道 ID："; read -r ARGO_TUN_ID || true
-  printf "请输入隧道凭据 JSON 文件路径："; read -r ARGO_CRED_FILE || true
-  printf "请输入用于公开访问的自有域名（CNAME 至隧道）："; read -r ARGO_DOMAIN || true
+  printf "如已创建固定隧道，优先粘贴 ARGO_TOKEN（最简）。留空则走凭据文件模式：\nARGO_TOKEN："
+  read -r ARGO_TOKEN || true
+  if [ -z "${ARGO_TOKEN}" ]; then
+    printf "未提供 Token，将使用凭据文件方式。\n隧道名称（任意名称，用于标识）："; read -r ARGO_TUN_NAME || true
+    printf "隧道 ID（UUID）："; read -r ARGO_TUN_ID || true
+    printf "隧道凭据 JSON 文件路径（可留空，按你系统默认）："; read -r ARGO_CRED_FILE || true
+    printf "用于公开访问的自有域名（CNAME 至隧道，可留空稍后再绑定）："; read -r ARGO_DOMAIN || true
+  fi
 else
-  ARGO_TUN_NAME=""; ARGO_TUN_ID=""; ARGO_CRED_FILE="";
-  printf "将使用临时隧道(trycloudflare.com)。请输入用于显示的域名(可留空)："; read -r ARGO_DOMAIN || true
+  ARGO_TUN_NAME=""; ARGO_TUN_ID=""; ARGO_CRED_FILE=""; ARGO_TOKEN="${ARGO_TOKEN:-}"
+  printf "将使用临时隧道(trycloudflare.com)。可输入用于显示的域名(留空跳过)："; read -r ARGO_DOMAIN || true
 fi
 
 # WireGuard outbound optional
@@ -139,26 +143,27 @@ fi
 setup_acme() {
   [ "${ACME_ENABLE:-0}" = "1" ] || return 0
   [ -n "${ACME_DOMAIN:-}" ] || { warn "未提供 ACME_DOMAIN，跳过证书签发"; return 0; }
+  if [ -z "${CF_API_TOKEN:-}" ]; then
+    warn "未提供 CF_API_TOKEN，跳过证书签发"
+    return 0
+  fi
   ensure_acme_sh || { warn "acme.sh 安装失败，跳过证书签发"; return 0; }
   export CF_Token="${CF_API_TOKEN:-}"
   export CF_Zone_ID="${CF_ZONE_ID:-}"
   export CF_Account_ID="${CF_ACCOUNT_ID:-}"
   ACME_BIN="$HOME/.acme.sh/acme.sh"
   mkdir -p "${CERT_DIR}"
-  # Issue ECDSA 256 cert
   if ! "$ACME_BIN" --list | grep -q "${ACME_DOMAIN}.*ECC"; then
     info "申请证书: ${ACME_DOMAIN} (DNS-01 / Cloudflare)"
     "$ACME_BIN" --issue --dns dns_cf -d "${ACME_DOMAIN}" --keylength ec-256 || {
-      warn "证书申请失败，跳过"
+      warn "证书申请失败，稍后可重试"
       return 0
     }
   fi
-  # Install to target paths and add reload hook via --reloadcmd
   "$ACME_BIN" --install-cert -d "${ACME_DOMAIN}" --ecc \
     --fullchain-file "${CERT_DIR}/fullchain.cer" \
     --key-file "${CERT_DIR}/private.key" \
     --reloadcmd "pkill -HUP -f '${SB_BIN}.*${CONFIG_JSON}' || true" || true
-  # Ensure cronjob
   "$ACME_BIN" --install-cronjob >/dev/null 2>&1 || true
 }
 
