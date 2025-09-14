@@ -130,7 +130,7 @@ openssl_reality_keypair() {
     | xxd -r -p | openssl base64 -A | tr '+/' '-_' | tr -d '=')
 }
 
-# Small helper to sanitize (strip CR/LF/leading-trailing spaces)
+# Small helper to sanitize (strip CR/LF and trim spaces)
 sanitize() { printf '%s' "$1" | tr -d '\r' | awk '{$1=$1}1'; }
 
 # Generate UUIDs and keys
@@ -254,8 +254,7 @@ VLESS_IN=$(cat <<V
           "private_key": "${REALITY_PRIVATE_KEY}",
           "short_id": [""]
         }
-      },
-      "transport": {"type": "tcp"}
+      }
     }
 V
 )
@@ -337,6 +336,34 @@ fi
 # Start sing-box (restart if running)
 kill -TERM $(pgrep -f "${SB_BIN}.*${CONFIG_JSON}" || true) 2>/dev/null || true
 nohup "${SB_BIN}" run -c "${CONFIG_JSON}" >"${LOG_DIR}/singbox.out" 2>&1 &
+
+# Cloudflared: create/route/run fixed tunnel, or run with token
+setup_argo() {
+  [ "${ARGO_MODE:-fixed}" = "fixed" ] || return 0
+  ensure_cloudflared || { warn "cloudflared 不可用，跳过隧道启动"; return 0; }
+  mkdir -p "${ARGO_DIR}" "${LOG_DIR}" || true
+  # Token mode is preferred (no cred path required)
+  if [ -n "${ARGO_TOKEN:-}" ]; then
+    info "使用 Token 运行固定隧道"
+    nohup cloudflared tunnel --no-autoupdate run --token "${ARGO_TOKEN}" >"${LOG_DIR}/cloudflared.out" 2>&1 &
+    return 0
+  fi
+  # Cred-file mode (optional)
+  if [ -n "${ARGO_TUN_NAME:-}" ] && [ -n "${ARGO_TUN_ID:-}" ] && [ -n "${ARGO_CRED_FILE:-}" ] && [ -n "${ARGO_DOMAIN:-}" ]; then
+    CFG_FILE="${ARGO_DIR}/config.yml"
+    cat >"${CFG_FILE}" <<Y
+`tunnel`: ${ARGO_TUN_NAME}
+`credentials-file`: ${ARGO_CRED_FILE}
+
+ingress:
+  - hostname: ${ARGO_DOMAIN}
+    service: http://127.0.0.1:${VMESS_WS_PORT}
+  - service: http_status:404
+Y
+    cloudflared tunnel --config "${CFG_FILE}" route dns "${ARGO_TUN_NAME}" "${ARGO_DOMAIN}" >/dev/null 2>&1 || true
+    nohup cloudflared --config "${CFG_FILE}" tunnel run "${ARGO_TUN_NAME}" >"${LOG_DIR}/cloudflared.out" 2>&1 &
+  fi
+}
 
 # Start/ensure Cloudflare tunnel per configuration
 setup_argo
