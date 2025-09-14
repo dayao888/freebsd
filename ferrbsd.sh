@@ -27,9 +27,10 @@ esac
 SERVER_IP=${SERVER_IP:-$(ext_ip)}
 [ -n "${SERVER_IP:-}" ] || SERVER_IP="127.0.0.1"
 
-VLESS_REALITY_PORT=${VLESS_REALITY_PORT:-$(rand_port_tcp)}
-VMESS_WS_PORT=${VMESS_WS_PORT:-$(rand_port_tcp)}
-HY2_PORT=${HY2_PORT:-$(rand_port_udp)}
+# Use fixed defaults unless user overrides via .env or input
+VLESS_REALITY_PORT=${VLESS_REALITY_PORT:-22099}
+VMESS_WS_PORT=${VMESS_WS_PORT:-33088}
+HY2_PORT=${HY2_PORT:-33366}
 HY2_MPORT=${HY2_MPORT:-}
 WSPATH=${WSPATH:-/ws}
 REALITY_SNI=${REALITY_SNI:-addons.mozilla.org}
@@ -206,14 +207,13 @@ if [ -f "${CERT_PATH}" ] && [ -f "${KEY_PATH}" ]; then
   HY2_TLS_ENABLED=1
 fi
 
-# DNS and routing with rule-sets
+# DNS and routing with rule-sets (use local resolver to avoid address_resolver issues)
 DNS_JSON=$(cat <<D
   "dns": {
     "servers": [
-      {"tag": "doh-cf", "address": "https://cloudflare-dns.com/dns-query", "strategy": "ipv4_only"},
-      {"tag": "doh-gg", "address": "https://dns.google/dns-query", "strategy": "ipv4_only"}
+      {"tag": "local", "address": "local"}
     ],
-    "final": "doh-cf",
+    "final": "local",
     "strategy": "ipv4_only"
   },
 D
